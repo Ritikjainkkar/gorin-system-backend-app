@@ -2,33 +2,40 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { FiTrash2 } from 'react-icons/fi';
-import { FaGripLines } from 'react-icons/fa';
-
-// Debounce utility to limit PUT calls when typing
-const debounce = (fn: (...args: any[]) => void, delay: number) => {
-  let timer: NodeJS.Timeout;
-  return (...args: any[]) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), delay);
-  };
-};
+import { FaEllipsisV } from 'react-icons/fa'; // Icon for 6 dots
+import {
+  getHighlights,
+  addHighlight as apiAddHighlight,
+  deleteHighlight as apiDeleteHighlight,
+  updateHighlightPosition,
+  updateHighlightText,
+} from '../api/highlights';
+import { debounce } from '@/util/debounce';
 
 interface Highlight {
-  id: string;
+  _id: string; // MongoDB uses _id instead of id
   text: string;
   position: number;
 }
 
 export default function Home() {
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false); // For fetching highlights
+  const [isActionInProgress, setIsActionInProgress] = useState<boolean>(false); // Freeze screen on any action
+  const [isUpdating, setIsUpdating] = useState<string | null>(null); // For updating a specific highlight
+  const [isDeleting,] = useState<string | null>(null); // For deleting a specific highlight
 
   useEffect(() => {
-    // Fetch highlights when component loads
     const fetchHighlights = async () => {
-      const response = await fetch('http://localhost:3000/highlights');
-      console.log('response', response)
-      const data = await response.json();
-      setHighlights(data);
+      setIsLoading(true);
+      try {
+        const data = await getHighlights();
+        setHighlights(data);
+      } catch (error) {
+        console.error('Error fetching highlights:', error);
+      } finally {
+        setIsLoading(false);
+      }
     };
 
     fetchHighlights();
@@ -36,26 +43,33 @@ export default function Home() {
 
   // Add new empty row
   const addHighlight = async () => {
-    const newHighlight: Highlight = { id: `${highlights.length + 1}`, text: '', position: highlights.length };
-    
-    // Add highlight to the backend
-    await fetch('http://localhost:3000/highlights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newHighlight),
-    });
+    setIsActionInProgress(true);
+    const newHighlight: Omit<Highlight, '_id'> = {
+      text: '',
+      position: highlights.length,
+    };
 
-    // Update UI
-    setHighlights([...highlights, newHighlight]);
+    try {
+      const createdHighlight = await apiAddHighlight(newHighlight);
+      setHighlights([...highlights, createdHighlight]);
+    } catch (error) {
+      console.error('Error adding highlight:', error);
+    } finally {
+      setIsActionInProgress(false);
+    }
   };
 
   // Delete a specific row
-  const deleteHighlight = async (id: string) => {
-    await fetch(`http://localhost:3000/highlights/${id}`, {
-      method: 'DELETE',
-    });
-    
-    setHighlights(highlights.filter((highlight) => highlight.id !== id));
+  const deleteHighlight = async (_id: string) => {
+    setIsActionInProgress(true);
+    try {
+      await apiDeleteHighlight(_id);
+      setHighlights(highlights.filter((highlight) => highlight._id !== _id));
+    } catch (error) {
+      console.error('Error deleting highlight:', error);
+    } finally {
+      setIsActionInProgress(false);
+    }
   };
 
   // Handle drag and drop to reorder highlights
@@ -66,19 +80,20 @@ export default function Home() {
     const [movedItem] = updatedHighlights.splice(draggedItemIndex, 1);
     updatedHighlights.splice(index, 0, movedItem);
 
-    // Update UI
     setHighlights(updatedHighlights);
 
-    // Update backend with the new positions
     updatedHighlights.forEach(async (item, i) => {
-      await fetch(`http://localhost:3000/highlights/${item.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...item, position: i }),
-      });
+      setIsUpdating(item._id); // Set updating state for each item being updated
+      try {
+        await updateHighlightPosition(item._id, i);
+      } catch (error) {
+        console.error('Error updating highlight position:', error);
+      } finally {
+        setIsUpdating(null);
+      }
     });
 
-    setDraggedItemIndex(null); // Reset dragged item index after drop
+    setDraggedItemIndex(null);
   };
 
   const [draggedItemIndex, setDraggedItemIndex] = useState<number | null>(null);
@@ -89,126 +104,168 @@ export default function Home() {
 
   // Debounced text update
   const updateText = useCallback(
-    debounce(async (id: string, text: string) => {
-      await fetch(`http://localhost:3000/highlights/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
+    debounce(async (_id: string, text: string): Promise<void> => {
+      setIsUpdating(_id);
+      try {
+        await updateHighlightText(_id, text);
+      } catch (error) {
+        console.error('Error updating highlight text:', error);
+      } finally {
+        setIsUpdating(null);
+      }
     }, 1000),
     []
   );
+  
 
   return (
     <div className="container">
+      {isActionInProgress && <div className="overlay">Loading...</div>}
+
       <div className="header">
-        <h3>Property highlights</h3>
-        <button onClick={addHighlight} className="add-button">
-          + Add Highlight
+        <h3>Property Highlights</h3>
+        <button onClick={addHighlight} className="add-button" disabled={isActionInProgress}>
+          {isActionInProgress ? 'Processing...' : '+ Add Highlight'}
         </button>
       </div>
+      <hr />
 
-      <div>
-        {highlights.map(({ id, text }, index) => (
-          <div
-            key={id}
-            draggable
-            onDragStart={() => handleDragStart(index)}
-            onDragOver={(e) => e.preventDefault()} // Necessary to allow drop
-            onDrop={() => handleDrop(index)}
-            className="highlight-row"
-          >
-            <span className="drag-handle">
-              <FaGripLines />
-            </span>
-            <input
-              type="text"
-              value={text}
-              onChange={(e) => {
-                setHighlights(
-                  highlights.map((item) =>
-                    item.id === id ? { ...item, text: e.target.value } : item
-                  )
-                );
-                updateText(id, e.target.value); // Debounced API call
-              }}
-              className="highlight-input"
-            />
-            <button onClick={() => deleteHighlight(id)} className="delete-button">
-              <FiTrash2 />
-            </button>
-          </div>
-        ))}
-      </div>
+      {isLoading ? (
+        <p>Loading highlights...</p>
+      ) : (
+        <div>
+          {highlights.map(({ _id, text }, index) => (
+            <div key={_id} draggable onDragStart={() => handleDragStart(index)} onDragOver={(e) => e.preventDefault()} onDrop={() => handleDrop(index)} className="highlight-row">
+              <span className="drag-handle">
+                <FaEllipsisV /> {/* 6-dot icon */}
+              </span>
+              <input
+                type="text"
+                value={text}
+                onChange={(e) => {
+                  setHighlights(
+                    highlights.map((item) =>
+                      item._id === _id ? { ...item, text: e.target.value } : item
+                    )
+                  );
+                  updateText(_id, e.target.value); // Debounced API call
+                }}
+                className="highlight-input"
+                disabled={isUpdating === _id || isActionInProgress}
+              />
+              <button onClick={() => deleteHighlight(_id)} className="delete-button" disabled={isDeleting === _id || isActionInProgress}>
+                {isDeleting === _id ? 'Deleting...' : <FiTrash2 />}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      
 
       <style jsx>{`
-        /* Add your styles here based on the provided design */
-        .container {
-          padding: 20px;
-          width: 100%;
-          margin: auto;
-          background-color: white;
-        }
-        .header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 10px;
-        }
-        h3 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #333;
-        }
-        .highlight-row {
-          display: flex;
-          align-items: center;
-          background-color: #f9f9f9;
-          border-radius: 5px;
-          margin-bottom: 10px;
-          padding: 10px;
-          border: 1px solid #e0e0e0;
-          cursor: move; /* Change cursor to indicate draggable */
-        }
-        .highlight-input {
-          flex-grow: 1;
-          padding: 8px;
-          font-size: 14px;
-          border: 1px solid #e0e0e0;
-          border-radius: 5px;
-          margin-right: 10px;
-        }
-        .drag-handle {
-          display: flex;
-          align-items: center;
-          padding-right: 10px;
-          color: #888;
-          cursor: grab;
-        }
-        .delete-button {
-          background: none;
-          border: none;
-          color: #888;
-          font-size: 18px;
-          cursor: pointer;
-        }
-        .add-button {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          background-color: #6c63ff;
-          color: white;
-          padding: 8px 12px;
-          font-size: 14px;
-          border: none;
-          border-radius: 5px;
-          cursor: pointer;
-          font-weight: 600;
-        }
-        .add-button:hover {
-          background-color: #5548c8;
-        }
-      `}</style>
+  hr {
+    border: 0;
+    height: 1px;
+    background: #e0e0e0;
+    margin: 10px 0;
+  }
+  .container {
+    padding: 32px;
+    width: 100%;
+    margin: auto;
+    background-color: white;
+    position: relative;
+  }
+  .overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    color: #6c63ff;
+    z-index: 10;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  h3 {
+    color: #7261FF;
+    font-size: 22px;
+    font-weight: 600;
+  }
+  .highlight-row {
+    display: flex;
+    align-items: center;
+    background-color: white;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 12px;
+    position: relative;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+  .highlight-input {
+    flex-grow: 1;
+    padding: 10px;
+    font-size: 14px;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-left: 16px;
+    margin-right: 12px;
+    transition: border-color 0.2s ease-in-out;
+  }
+  .highlight-input:focus {
+    border-color: #7261FF;
+    outline: none;
+  }
+  .drag-handle {
+    display: flex;
+    align-items: center;
+    padding-right: 12px;
+    color: #888;
+    cursor: grab;
+  }
+  .delete-button {
+    background: none;
+    border: none;
+    color: #FF6B6B;
+    font-size: 18px;
+    cursor: pointer;
+    transition: color 0.2s ease-in-out;
+  }
+  .delete-button:hover {
+    color: #ff4949;
+  }
+  .add-button {
+    background-color: #7261FF;
+    color: white;
+    padding: 10px 16px;
+    font-size: 14px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.2s ease-in-out;
+  }
+  .add-button:hover {
+    background-color: #5548c8;
+  }
+  .line-break {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid #e0e0e0;
+    margin: 0;
+    margin-top: 12px;
+  }
+`}</style>
+
     </div>
   );
 }
